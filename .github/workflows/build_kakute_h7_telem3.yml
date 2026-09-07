@@ -1,0 +1,92 @@
+name: Kakute H7 UART3 Telem3
+on:
+  push:
+    paths:
+      - '.github/workflows/build_kakute_h7_telem3.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/px4/px4-dev:v1.16.0-rc1-258-g0369abd556
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: PX4/PX4-Autopilot
+          ref: d6f12ad1c4f70ad3230afd7d86e971421e02fef4
+          fetch-depth: 0
+          submodules: recursive
+      - name: Configure Git working directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Apply UART3 patch
+        run: |
+          cat > /tmp/uart3_telem3.patch <<'PATCH'
+          --- a/boards/holybro/kakuteh7/default.px4board
+          +++ b/boards/holybro/kakuteh7/default.px4board
+          @@ -3,6 +3,7 @@
+           CONFIG_BOARD_SERIAL_GPS1="/dev/ttyS3"
+           CONFIG_BOARD_SERIAL_TEL1="/dev/ttyS0"
+           CONFIG_BOARD_SERIAL_TEL2="/dev/ttyS1"
+          +CONFIG_BOARD_SERIAL_TEL3="/dev/ttyS2"
+           CONFIG_BOARD_SERIAL_RC="/dev/ttyS4"
+           CONFIG_DRIVERS_ADC_BOARD_ADC=y
+           CONFIG_COMMON_BAROMETERS=y
+          --- a/boards/holybro/kakuteh7/nuttx-config/nsh/defconfig
+          +++ b/boards/holybro/kakuteh7/nuttx-config/nsh/defconfig
+          @@ -237,7 +237,7 @@
+           CONFIG_USART2_TXBUFSIZE=2500
+           CONFIG_USART3_BAUD=57600
+           CONFIG_USART3_RXBUFSIZE=600
+          -CONFIG_USART3_SERIAL_CONSOLE=y
+          +# CONFIG_USART3_SERIAL_CONSOLE is not set
+           CONFIG_USART3_TXBUFSIZE=1500
+           CONFIG_USART6_BAUD=57600
+           CONFIG_USART6_RXBUFSIZE=600
+          @@ -247,3 +247,10 @@
+           CONFIG_USBDEV_MAXPOWER=500
+           CONFIG_USEC_PER_TICK=1000
+           CONFIG_WATCHDOG=y
+          +CONFIG_NO_SERIAL_CONSOLE=y
+          +CONFIG_DEV_CONSOLE=y
+          +CONFIG_CONSOLE_SYSLOG=y
+          +CONFIG_RAMLOG=y
+          +CONFIG_RAMLOG_SYSLOG=y
+          +CONFIG_RAMLOG_BUFSIZE=1024
+          +# CONFIG_SYSLOG_CONSOLE is not set
+          PATCH
+          git apply --check /tmp/uart3_telem3.patch
+          git apply /tmp/uart3_telem3.patch
+      - name: Build firmware
+        run: make holybro_kakuteh7_default
+      - name: Check generated configuration and collect artifacts
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+          b = Path('build/holybro_kakuteh7_default')
+          configs = list(b.rglob('.config'))
+          configs = [p for p in configs if 'CONFIG_STM32H7_USART3=y' in p.read_text()]
+          assert len(configs) == 1, configs
+          s = configs[0].read_text()
+          for key in ['CONFIG_NO_SERIAL_CONSOLE=y', 'CONFIG_CONSOLE_SYSLOG=y', 'CONFIG_RAMLOG_SYSLOG=y', 'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y']:
+              assert key in s.splitlines(), key
+          assert not re.search(r'^CONFIG_(?!NO_).*_SERIAL_CONSOLE=y$', s, re.M)
+          assert (b / 'holybro_kakuteh7_default.px4').stat().st_size > 100000
+          PYTHON
+          mkdir -p artifacts
+          cp build/holybro_kakuteh7_default/holybro_kakuteh7_default.px4 artifacts/kakute_h7_v1.17.0_uart3_telem3.px4
+          git diff > artifacts/uart3_telem3.patch
+          git rev-parse HEAD > artifacts/upstream_commit.txt
+          arm-none-eabi-gcc --version > artifacts/compiler.txt
+          sha256sum artifacts/*.px4 > artifacts/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kakute_h7_uart3_telem3_unflighttested
+          path: artifacts/
+          if-no-files-found: error
