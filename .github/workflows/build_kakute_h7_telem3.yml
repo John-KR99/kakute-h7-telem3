@@ -1,5 +1,5 @@
 name: Kakute H7 UART3 Telem3
-on:
+'on':
   push:
     paths:
       - '.github/workflows/build_kakute_h7_telem3.yml'
@@ -9,84 +9,237 @@ permissions:
 jobs:
   firmware:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     container:
       image: ghcr.io/px4/px4-dev:v1.16.0-rc1-258-g0369abd556
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out pinned PX4 source
+        uses: actions/checkout@v4
         with:
           repository: PX4/PX4-Autopilot
           ref: d6f12ad1c4f70ad3230afd7d86e971421e02fef4
           fetch-depth: 0
           submodules: recursive
-      - name: Configure Git working directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Apply UART3 patch
+          persist-credentials: false
+
+      - name: Record source and compiler
         run: |
-          cat > /tmp/uart3_telem3.patch <<'PATCH'
-          --- a/boards/holybro/kakuteh7/default.px4board
-          +++ b/boards/holybro/kakuteh7/default.px4board
-          @@ -3,6 +3,7 @@
-           CONFIG_BOARD_SERIAL_GPS1="/dev/ttyS3"
-           CONFIG_BOARD_SERIAL_TEL1="/dev/ttyS0"
-           CONFIG_BOARD_SERIAL_TEL2="/dev/ttyS1"
-          +CONFIG_BOARD_SERIAL_TEL3="/dev/ttyS2"
-           CONFIG_BOARD_SERIAL_RC="/dev/ttyS4"
-           CONFIG_DRIVERS_ADC_BOARD_ADC=y
-           CONFIG_COMMON_BAROMETERS=y
-          --- a/boards/holybro/kakuteh7/nuttx-config/nsh/defconfig
-          +++ b/boards/holybro/kakuteh7/nuttx-config/nsh/defconfig
-          @@ -237,7 +237,7 @@
-           CONFIG_USART2_TXBUFSIZE=2500
-           CONFIG_USART3_BAUD=57600
-           CONFIG_USART3_RXBUFSIZE=600
-          -CONFIG_USART3_SERIAL_CONSOLE=y
-          +# CONFIG_USART3_SERIAL_CONSOLE is not set
-           CONFIG_USART3_TXBUFSIZE=1500
-           CONFIG_USART6_BAUD=57600
-           CONFIG_USART6_RXBUFSIZE=600
-          @@ -247,3 +247,10 @@
-           CONFIG_USBDEV_MAXPOWER=500
-           CONFIG_USEC_PER_TICK=1000
-           CONFIG_WATCHDOG=y
-          +CONFIG_NO_SERIAL_CONSOLE=y
-          +CONFIG_DEV_CONSOLE=y
-          +CONFIG_CONSOLE_SYSLOG=y
-          +CONFIG_RAMLOG=y
-          +CONFIG_RAMLOG_SYSLOG=y
-          +CONFIG_RAMLOG_BUFSIZE=1024
-          +# CONFIG_SYSLOG_CONSOLE is not set
-          PATCH
-          git apply --check /tmp/uart3_telem3.patch
-          git apply /tmp/uart3_telem3.patch
-      - name: Build firmware
-        run: make holybro_kakuteh7_default
-      - name: Check generated configuration and collect artifacts
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p diagnostics artifacts
+          test "$(git rev-parse HEAD)" = d6f12ad1c4f70ad3230afd7d86e971421e02fef4
+          git rev-parse HEAD > diagnostics/upstream_commit.txt
+          git describe --tags --always > diagnostics/upstream_version.txt
+          git submodule status --recursive > diagnostics/submodules.txt
+          arm-none-eabi-gcc --version > diagnostics/compiler.txt
+
+      - name: Expose UART3 as a generic TELEM3 port
         run: |
+          set -euo pipefail
           python3 - <<'PYTHON'
           from pathlib import Path
           import re
-          b = Path('build/holybro_kakuteh7_default')
-          configs = list(b.rglob('.config'))
-          configs = [p for p in configs if 'CONFIG_STM32H7_USART3=y' in p.read_text()]
-          assert len(configs) == 1, configs
-          s = configs[0].read_text()
-          for key in ['CONFIG_NO_SERIAL_CONSOLE=y', 'CONFIG_CONSOLE_SYSLOG=y', 'CONFIG_RAMLOG_SYSLOG=y', 'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y']:
-              assert key in s.splitlines(), key
-          assert not re.search(r'^CONFIG_(?!NO_).*_SERIAL_CONSOLE=y$', s, re.M)
-          assert (b / 'holybro_kakuteh7_default.px4').stat().st_size > 100000
+
+          board = Path('boards/holybro/kakuteh7/default.px4board')
+          config = Path('boards/holybro/kakuteh7/nuttx-config/nsh/defconfig')
+          board_text = board.read_text()
+          config_text = config.read_text()
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def values(text):
+              return dict(re.findall(r'^(CONFIG_\w+)=(.*)$', text, re.M))
+
+          def set_config(text, key, value):
+              # Replace an existing assignment or unset entry, without duplicates.
+              pattern = rf'^(?:{re.escape(key)}=.*|# {re.escape(key)} is not set)\n?'
+              text = re.sub(pattern, '', text, flags=re.M)
+              line = f'# {key} is not set' if value == 'n' else f'{key}={value}'
+              return text.rstrip() + '\n' + line + '\n'
+
+          expected_ports = {
+              'CONFIG_BOARD_SERIAL_TEL1': '"/dev/ttyS0"',
+              'CONFIG_BOARD_SERIAL_TEL2': '"/dev/ttyS1"',
+              'CONFIG_BOARD_SERIAL_GPS1': '"/dev/ttyS3"',
+              'CONFIG_BOARD_SERIAL_RC': '"/dev/ttyS4"',
+          }
+          existing = values(board_text)
+          for key, value in expected_ports.items():
+              require(existing.get(key) == value, f'Unexpected port mapping: {key}')
+          for key, value in existing.items():
+              if key.startswith('CONFIG_BOARD_SERIAL_') and value == '"/dev/ttyS2"':
+                  require(key == 'CONFIG_BOARD_SERIAL_TEL3', f'UART3 already assigned: {key}')
+
+          original = values(config_text)
+          for uart in (1, 2, 3):
+              require(original.get(f'CONFIG_STM32H7_USART{uart}') == 'y',
+                      f'USART{uart} must be enabled for the expected ttyS mapping')
+          consoles = re.findall(r'^CONFIG_(?!NO_)(\w+)_SERIAL_CONSOLE=y$', config_text, re.M)
+          require(consoles in (['USART3'], []), f'Unexpected console assignment: {consoles}')
+
+          settings = {
+              'CONFIG_USART3_SERIAL_CONSOLE': 'n',
+              'CONFIG_NO_SERIAL_CONSOLE': 'y',
+              'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING': 'y',
+              'CONFIG_DEV_CONSOLE': 'y',
+              'CONFIG_SYSLOG': 'y',
+              'CONFIG_CONSOLE_SYSLOG': 'y',
+              'CONFIG_RAMLOG': 'y',
+              'CONFIG_RAMLOG_SYSLOG': 'y',
+              'CONFIG_RAMLOG_NONBLOCKING': 'y',
+              'CONFIG_RAMLOG_BUFSIZE': '1024',
+              # Avoid feeding syslog back into /dev/console -> syslog.
+              'CONFIG_SYSLOG_CONSOLE': 'n',
+          }
+          # Refuse unknown symbols rather than silently dropping a setting.
+          nuttx = Path('platforms/nuttx/NuttX/nuttx')
+          symbols = set()
+          for path in nuttx.rglob('Kconfig*'):
+              if path.is_file():
+                  symbols.update(re.findall(r'^\s*(?:menuconfig|config)\s+(\w+)\s*$',
+                                            path.read_text(errors='replace'), re.M))
+          for key in settings:
+              require(key.removeprefix('CONFIG_') in symbols, f'Missing NuttX symbol: {key}')
+          board_text = set_config(board_text, 'CONFIG_BOARD_SERIAL_TEL3', '"/dev/ttyS2"')
+          for key, value in settings.items():
+              config_text = set_config(config_text, key, value)
+          board.write_text(board_text)
+          config.write_text(config_text)
+          print('TELEM3=/dev/ttyS2; UART3 serial console disabled; ttyS ordering fixed.')
+          print('No MAVLink instance is forced onto TELEM3; select the consumer via parameters.')
           PYTHON
-          mkdir -p artifacts
-          cp build/holybro_kakuteh7_default/holybro_kakuteh7_default.px4 artifacts/kakute_h7_v1.17.0_uart3_telem3.px4
-          git diff > artifacts/uart3_telem3.patch
-          git rev-parse HEAD > artifacts/upstream_commit.txt
-          arm-none-eabi-gcc --version > artifacts/compiler.txt
-          sha256sum artifacts/*.px4 > artifacts/SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+          git diff --check
+          git diff -- boards/holybro/kakuteh7 > diagnostics/uart3_telem3.patch
+          cp boards/holybro/kakuteh7/default.px4board diagnostics/default.px4board
+          cp boards/holybro/kakuteh7/nuttx-config/nsh/defconfig diagnostics/requested_defconfig.txt
+
+      - name: Build firmware
+        run: |
+          set -euo pipefail
+          make holybro_kakuteh7_default 2>&1 | tee diagnostics/build.log
+
+      - name: Validate generated configuration and TELEM3 metadata
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON' 2>&1 | tee diagnostics/validation.log
+          from pathlib import Path
+          import base64
+          import json
+          import re
+          import shutil
+          import xml.etree.ElementTree as ET
+          import zlib
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          b = Path('build/holybro_kakuteh7_default')
+          configs = [p for p in b.rglob('.config')
+                     if 'CONFIG_STM32H7_USART3=y' in p.read_text().splitlines()]
+          require(len(configs) == 1, f'Expected one generated NuttX config: {configs}')
+          text = configs[0].read_text()
+          enabled = set(text.splitlines())
+          for setting in (
+              'CONFIG_STM32H7_USART1=y', 'CONFIG_STM32H7_USART2=y',
+              'CONFIG_STM32H7_USART3=y', 'CONFIG_NO_SERIAL_CONSOLE=y',
+              'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y', 'CONFIG_DEV_CONSOLE=y',
+              'CONFIG_SYSLOG=y', 'CONFIG_CONSOLE_SYSLOG=y', 'CONFIG_RAMLOG=y',
+              'CONFIG_RAMLOG_SYSLOG=y', 'CONFIG_RAMLOG_NONBLOCKING=y',
+              'CONFIG_RAMLOG_BUFSIZE=1024',
+          ):
+              require(setting in enabled, f'Kconfig did not retain: {setting}')
+          require(not re.search(r'^CONFIG_(?!NO_)\w+_SERIAL_CONSOLE=y$', text, re.M),
+                  'A UART is still configured as the serial console')
+          require('CONFIG_SYSLOG_CONSOLE=y' not in enabled, 'Recursive console/syslog backend')
+          shutil.copy2(configs[0], 'diagnostics/generated_nuttx_config.txt')
+
+          # Verify the actual generated parameter table, not just the source config.
+          matches = []
+          for path in b.rglob('parameters.xml'):
+              root = ET.parse(path).getroot()
+              params = {p.get('name'): p for p in root.iter('parameter')}
+              if 'SER_TEL3_BAUD' in params:
+                  matches.append((path, params))
+          require(matches, 'SER_TEL3_BAUD missing from generated parameters.xml')
+          path, params = matches[0]
+          mavlink_ports = []
+          for name, parameter in params.items():
+              if re.fullmatch(r'MAV_\d+_CONFIG', name or ''):
+                  for value in parameter.iter('value'):
+                      label = ''.join(value.itertext())
+                      if value.get('code') == '103' and re.search(r'TELEM\s*3', label, re.I):
+                          mavlink_ports.append(name)
+          require(mavlink_ports, 'Generated MAVLink parameters do not offer TELEM3 (103)')
+          shutil.copy2(path, 'diagnostics/parameters.xml')
+
+          scripts = [p for p in b.rglob('rc.serial') if p.is_file()]
+          matching_scripts = [p for p in scripts
+                              if '/dev/ttyS2' in p.read_text()
+                              and 'SER_TEL3_BAUD' in p.read_text()]
+          require(matching_scripts, 'TELEM3 device/baud mapping missing from generated rc.serial')
+          shutil.copy2(matching_scripts[0], 'diagnostics/rc.serial')
+
+          firmware = b / 'holybro_kakuteh7_default.px4'
+          require(firmware.is_file(), 'PX4 package was not produced')
+          package = json.loads(firmware.read_text())
+          image = zlib.decompress(base64.b64decode(package['image'], validate=True))
+          require(len(image) > 100000, 'Firmware image is unexpectedly small')
+          require(len(image) == package['image_size'], 'PX4 image size mismatch')
+          print('PASS: NuttX console settings; TELEM3 baud parameter; MAVLink TELEM3 selection;')
+          print('      generated rc.serial references; PX4 package image integrity.')
+          print('MAVLink selectors offering TELEM3:', ', '.join(sorted(mavlink_ports)))
+          print('Board ID reported by the package:', package.get('board_id'))
+          print('Hardware boot, V1.5 sensor compatibility and UART TX/RX are NOT tested here.')
+          PYTHON
+
+      - name: Package verified build outputs
+        run: |
+          set -euo pipefail
+          cp build/holybro_kakuteh7_default/holybro_kakuteh7_default.px4 artifacts/kakute_h7_uart3_telem3_d6f12ad1c4f7.px4
+          cp diagnostics/{uart3_telem3.patch,upstream_commit.txt,upstream_version.txt,compiler.txt,validation.log} artifacts/
+          cat > artifacts/READ_ME_FIRST.txt <<'TEXT'
+          Target: holybro_kakuteh7_default; intended hardware: Kakute H7 V1.5.
+          This is a custom build, not a flight-tested release. Bootloader is unchanged.
+          Verify that your exact hardware uses this PX4 target before loading.
+          UART3 is exposed as TELEM3 (/dev/ttyS2). Its application serial console is disabled.
+          TELEM3 does not automatically start a protocol. Assign ONE supported driver/service.
+          For MAVLink, select TELEM3 in an unused MAV_n_CONFIG and reboot; set SER_TEL3_BAUD
+          to the connected device's baud rate and choose the appropriate MAV_n_MODE.
+          Do not select a MAVLink instance already needed by another telemetry link.
+          Other protocols require their corresponding driver to be compiled into this target.
+          Back up existing parameters. Use USB/QGroundControl for initial configuration.
+          With propellers removed, check boot/sensors, existing GPS/RC/telemetry and UART3 TX/RX.
+          Firmware configuration checks do not prove physical UART pin routing or flight safety.
+          TEXT
+          (cd artifacts && sha256sum *.px4 > SHA256SUMS.txt)
+
+      - name: Upload firmware after all validation passes
+        uses: actions/upload-artifact@v4
         with:
           name: kakute_h7_uart3_telem3_unflighttested
           path: artifacts/
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Collect diagnostics even after failure
+        if: ${{ always() }}
+        run: |
+          mkdir -p diagnostics
+          if [ -d build/holybro_kakuteh7_default ]; then
+            find build/holybro_kakuteh7_default -name .config -type f -print -exec cat {} \; > diagnostics/all_generated_configs.txt
+          fi
+
+      - name: Upload diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kakute_h7_uart3_telem3_diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 30
