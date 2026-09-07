@@ -1,3 +1,7 @@
+# Replace .github/workflows/build_kakute_h7_telem3.yml with this file.
+# Intended board: Kakute H7 V1.5, target holybro_kakuteh7_default (not h7v2).
+# This workflow has been checked locally for syntax, not executed against PX4.
+# Keep the upstream commit and build image from the supplied workflow.
 name: Kakute H7 UART3 Telem3
 'on':
   push:
