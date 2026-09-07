@@ -2,7 +2,7 @@
 # Intended board: Kakute H7 V1.5, target holybro_kakuteh7_default (not h7v2).
 # This workflow has been checked locally for syntax, not executed against PX4.
 # Keep the upstream commit and build image from the supplied workflow.
-name: Kakute H7 UART3 Telem3
+name: Kakute H7 UART3 Telem3 R3
 'on':
   push:
     paths:
@@ -86,12 +86,13 @@ jobs:
           consoles = re.findall(r'^CONFIG_(?!NO_)(\w+)_SERIAL_CONSOLE=y$', config_text, re.M)
           require(consoles in (['USART3'], []), f'Unexpected console assignment: {consoles}')
 
+          # This pinned NuttX tree has no standalone CONFIG_SYSLOG symbol.
+          # Configure the console and RAMLOG backends directly.
           settings = {
               'CONFIG_USART3_SERIAL_CONSOLE': 'n',
               'CONFIG_NO_SERIAL_CONSOLE': 'y',
               'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING': 'y',
               'CONFIG_DEV_CONSOLE': 'y',
-              'CONFIG_SYSLOG': 'y',
               'CONFIG_CONSOLE_SYSLOG': 'y',
               'CONFIG_RAMLOG': 'y',
               'CONFIG_RAMLOG_SYSLOG': 'y',
@@ -153,7 +154,7 @@ jobs:
               'CONFIG_STM32H7_USART1=y', 'CONFIG_STM32H7_USART2=y',
               'CONFIG_STM32H7_USART3=y', 'CONFIG_NO_SERIAL_CONSOLE=y',
               'CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y', 'CONFIG_DEV_CONSOLE=y',
-              'CONFIG_SYSLOG=y', 'CONFIG_CONSOLE_SYSLOG=y', 'CONFIG_RAMLOG=y',
+              'CONFIG_CONSOLE_SYSLOG=y', 'CONFIG_RAMLOG=y',
               'CONFIG_RAMLOG_SYSLOG=y', 'CONFIG_RAMLOG_NONBLOCKING=y',
               'CONFIG_RAMLOG_BUFSIZE=1024',
           ):
