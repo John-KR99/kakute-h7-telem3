@@ -2,7 +2,7 @@
 # Intended board: Kakute H7 V1.5, target holybro_kakuteh7_default (not h7v2).
 # This workflow has been checked locally for syntax, not executed against PX4.
 # Keep the upstream commit and build image from the supplied workflow.
-name: Kakute H7 UART3 Telem3 R3
+name: Kakute H7 UART3 Telem3 R4
 'on':
   push:
     paths:
@@ -183,12 +183,29 @@ jobs:
           require(mavlink_ports, 'Generated MAVLink parameters do not offer TELEM3 (103)')
           shutil.copy2(path, 'diagnostics/parameters.xml')
 
-          scripts = [p for p in b.rglob('rc.serial') if p.is_file()]
-          matching_scripts = [p for p in scripts
-                              if '/dev/ttyS2' in p.read_text()
-                              and 'SER_TEL3_BAUD' in p.read_text()]
-          require(matching_scripts, 'TELEM3 device/baud mapping missing from generated rc.serial')
-          shutil.copy2(matching_scripts[0], 'diagnostics/rc.serial')
+          # PX4 splits service startup (rc.serial) from port selection (rc.serial_port).
+          # Check the TELEM3 branch in the port selector, and its caller beside it.
+          scripts = sorted(p for p in b.rglob('rc.serial_port') if p.is_file())
+          verified = []
+          for script in scripts:
+              content = script.read_text()
+              branches = re.split(r'(?=^if param compare )', content, flags=re.M)
+              for branch in branches:
+                  if not re.match(r'if param compare "?\$PRT"? 103; then', branch):
+                      continue
+                  device_ok = re.search(r'^\s*set SERIAL_DEV "?/dev/ttyS2"?\s*$', branch, re.M)
+                  baud_ok = re.search(r'^\s*set BAUD_PARAM "?SER_TEL3_BAUD"?\s*$', branch, re.M)
+                  caller = script.with_name('rc.serial')
+                  if device_ok and baud_ok and caller.is_file():
+                      startup = caller.read_text()
+                      if ('etc/init.d/rc.serial_port' in startup
+                              and re.search(r'^\s*\. "?\$PRT_F"?\s*$', startup, re.M)):
+                          verified.append((script, caller))
+          require(verified, 'TELEM3 (103) -> /dev/ttyS2 + SER_TEL3_BAUD, or rc.serial caller missing; see diagnostics/serial_scripts')
+          script, caller = verified[0]
+          shutil.copy2(script, 'diagnostics/rc.serial_port')
+          shutil.copy2(caller, 'diagnostics/rc.serial')
+          print('Verified generated port selector:', script)
 
           firmware = b / 'holybro_kakuteh7_default.px4'
           require(firmware.is_file(), 'PX4 package was not produced')
@@ -197,7 +214,7 @@ jobs:
           require(len(image) > 100000, 'Firmware image is unexpectedly small')
           require(len(image) == package['image_size'], 'PX4 image size mismatch')
           print('PASS: NuttX console settings; TELEM3 baud parameter; MAVLink TELEM3 selection;')
-          print('      generated rc.serial references; PX4 package image integrity.')
+          print('      generated rc.serial_port mapping and rc.serial caller; PX4 package image integrity.')
           print('MAVLink selectors offering TELEM3:', ', '.join(sorted(mavlink_ports)))
           print('Board ID reported by the package:', package.get('board_id'))
           print('Hardware boot, V1.5 sensor compatibility and UART TX/RX are NOT tested here.')
@@ -238,6 +255,17 @@ jobs:
           mkdir -p diagnostics
           if [ -d build/holybro_kakuteh7_default ]; then
             find build/holybro_kakuteh7_default -name .config -type f -print -exec cat {} \; > diagnostics/all_generated_configs.txt
+            python3 - <<'PYTHON'
+          from pathlib import Path
+          import shutil
+          b = Path('build/holybro_kakuteh7_default')
+          for name in ('rc.serial', 'rc.serial_port'):
+              for src in b.rglob(name):
+                  if src.is_file():
+                      dest = Path('diagnostics/serial_scripts') / src.relative_to(b)
+                      dest.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(src, dest)
+          PYTHON
           fi
 
       - name: Upload diagnostics
