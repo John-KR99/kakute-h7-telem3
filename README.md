@@ -39,9 +39,15 @@ Key changes include:
 
 **Important:** UART3 is no longer available as the original serial debug console in this build. The change does **not** automatically launch MAVLink, GPS, or any other protocol on TELEM3.
 
+## Download the experimental firmware release
+
+**[Kakute H7 UART3 TELEM3 — experimental v0.1.0](https://github.com/John-KR99/kakute-h7-telem3/releases/tag/kakuteh7-telem3-v0.1.0)** provides a downloadable `.px4` firmware file, a SHA-256 checksum, the configuration patch, and `READ_ME_FIRST.txt`.
+
+The prebuilt firmware is specifically intended for **Kakute H7 V1.5**. It is **not an official release**, and the newly compiled release binary has not been separately flight-qualified. Read the compatibility and safety notes before flashing.
+
 ## Build and download a `.px4` firmware file
 
-This repository contains the **build recipe**, not a complete PX4 source fork and not a permanently hosted firmware binary.
+This repository also provides the **reproducible build recipe** (not a full PX4 source fork). To build a fresh binary yourself:
 
 1. Open [GitHub Actions](https://github.com/John-KR99/kakute-h7-telem3/actions) for this repository.
 2. Select **Kakute H7 UART3 Telem3 R4**.
@@ -54,7 +60,7 @@ GitHub Actions artifacts have a **30-day retention period** in this workflow. If
 
 The workflow uses the pinned PX4 source and PX4 development container to run `make holybro_kakuteh7_default`. Its automated checks inspect the generated NuttX configuration, `SER_TEL3_BAUD`, MAVLink port-selection metadata (`TELEM3 = 103`), serial startup scripts, and `.px4` package integrity.
 
-The [September 7, 2026 build](https://github.com/John-KR99/kakute-h7-telem3/actions/runs/34091755804) completed successfully. A green build confirms compilation and those static checks; it does **not** by itself prove electrical compatibility or flight safety.
+The [November 10, 2026 release build](https://github.com/John-KR99/kakute-h7-telem3/actions/runs/42837891837) completed successfully. A green build confirms compilation and those static checks; it does **not** by itself prove electrical compatibility or flight safety.
 
 ## Flash and configure
 
