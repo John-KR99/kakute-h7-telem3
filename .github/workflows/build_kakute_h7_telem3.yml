@@ -276,3 +276,63 @@ jobs:
           path: diagnostics/
           if-no-files-found: warn
           retention-days: 30
+
+  # One-time publication tied to this specific documentation/release commit.
+  # Future manual builds remain build-only.
+  release:
+    name: Publish experimental firmware release
+    needs: firmware
+    if: >-
+      github.event_name == 'push' &&
+      github.event.head_commit.message == 'release: publish experimental Kakute H7 TELEM3 firmware'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kakute_h7_uart3_telem3_unflighttested
+          path: release_assets
+
+      - name: Verify firmware asset and SHA-256 digest
+        run: |
+          set -euo pipefail
+          test -s release_assets/kakute_h7_uart3_telem3_d6f12ad1c4f7.px4
+          test -s release_assets/SHA256SUMS.txt
+          (cd release_assets && sha256sum -c SHA256SUMS.txt)
+
+      - name: Publish GitHub pre-release
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: kakuteh7-telem3-v0.1.0
+          name: "Kakute H7 V1.5 UART3 TELEM3 — experimental v0.1.0"
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            release_assets/*.px4
+            release_assets/SHA256SUMS.txt
+            release_assets/uart3_telem3.patch
+            release_assets/READ_ME_FIRST.txt
+          body: |
+            Experimental community PX4 custom firmware for Holybro Kakute H7 V1.5
+            (target: holybro_kakuteh7_default). Not an official PX4 or Holybro release.
+
+            - Change: disable the UART3/NuttX serial console and expose UART3
+              (/dev/ttyS2, physical R3/T3) as TELEM3.
+            - Source: PX4/PX4-Autopilot pinned at d6f12ad1c4f70ad3230afd7d86e971421e02fef4.
+            - Validation: clean GitHub Actions build, generated NuttX/PX4 port and
+              parameter checks, and SHA-256 package verification.
+            - Hardware history: the author previously reported successful GPS/RTK
+              operation and limited flight testing on Kakute H7 V1.5. This newly
+              generated binary has not been separately flight-qualified.
+            - Compatibility: other Kakute H7 revisions, H7 Mini, and H7 V2 are
+              not validated. No bootloader modification.
+            - Important: TELEM3 does not automatically start MAVLink or GPS.
+              Configure one supported serial service and matching baud rate;
+              back up parameters and test with propellers removed first.
+
+            Read the repository README and READ_ME_FIRST.txt before flashing.
